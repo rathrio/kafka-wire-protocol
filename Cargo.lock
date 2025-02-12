@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "kafka-tcp-client"
+name = "kafka-wire-protocol"
 version = "0.1.0"

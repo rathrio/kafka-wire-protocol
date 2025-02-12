@@ -1,5 +1,5 @@
 [package]
-name = "kafka-tcp-client"
+name = "kafka-wire-protocol"
 version = "0.1.0"
 edition = "2021"
 
