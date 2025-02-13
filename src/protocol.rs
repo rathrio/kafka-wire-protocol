@@ -1,6 +1,4 @@
-use std::io::{Read, Write};
-
-use crate::hex_dump;
+use std::io::Write;
 
 #[derive(Debug)]
 pub struct MetadataRequest {
@@ -99,7 +97,11 @@ pub struct Partition {
 #[derive(Debug)]
 pub enum ParserError {
     Unknown,
+    /// The size of the message as indicated in the first 4 bytes is larger than
+    /// the byte buffer we want to parse.
+    IncompleteMessage,
     NotEnoughBytes,
+    InvalidEncoding,
 }
 
 pub type ParserResult<T> = Result<T, ParserError>;
@@ -112,7 +114,25 @@ pub struct Parser {
 }
 
 impl Parser {
-    pub fn new(size: i32) -> Self {
+    pub fn parse(bytes: &[u8]) -> (ParserResult<MetadataResponse>, usize) {
+        if bytes.len() < 4 {
+            return (Err(ParserError::IncompleteMessage), 0);
+        }
+
+        let size = i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let num_bytes = size as usize + 4;
+        if bytes.len() < num_bytes {
+            return (Err(ParserError::IncompleteMessage), 0);
+        }
+
+        let mut parser = Parser::new(size);
+        (
+            parser.parse_metadata_response(&bytes[4..num_bytes]),
+            num_bytes,
+        )
+    }
+
+    fn new(size: i32) -> Self {
         Parser { current: 0, size }
     }
 
@@ -327,7 +347,7 @@ impl Parser {
                 self.current += num_bytes;
                 Ok(value)
             }
-            Err(_) => Err(ParserError::Unknown),
+            Err(_) => Err(ParserError::InvalidEncoding),
         }
     }
 
@@ -336,7 +356,7 @@ impl Parser {
         self.current += 1;
 
         if self.current == self.size as usize {
-            return Err(ParserError::Unknown);
+            return Err(ParserError::NotEnoughBytes);
         }
 
         Ok(byte)
@@ -374,6 +394,7 @@ fn parse_varint(bytes: &[u8]) -> Result<(u64, usize), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn test_parse_varint_single_byte() {
@@ -384,7 +405,7 @@ mod tests {
 
     #[test]
     fn test_parse_varint_multiple_bytes() {
-        let bytes = [0xAC, 0x02]; // in binary: 1010_1100 0000_0010
+        let bytes = [0xAC, 0x02];
         let result = parse_varint(&bytes);
         assert_eq!(result, Ok((300, 2)));
     }
@@ -394,5 +415,27 @@ mod tests {
         let bytes = [0xAC];
         let result = parse_varint(&bytes);
         assert_eq!(result, Err("incomplete varint"));
+    }
+
+    proptest! {
+        #[test]
+        fn test_metadata_request_length(correlation_id in any::<i32>(), client_id in any::<String>()) {
+            let request = MetadataRequest::new(correlation_id, client_id);
+            let bytes = request.encode().expect("encoding failed");
+
+            // The complete message has 4 bytes for indicating the length
+            // followed by the actual message (of length request.length()).
+            assert_eq!(bytes.len() - 4, request.length() as usize)
+        }
+
+        #[test]
+        fn test_varint_doesnt_crash(bytes in any::<Vec<u8>>()) {
+            let _ = parse_varint(&bytes);
+        }
+
+        #[test]
+        fn test_parser_doesnt_crash(bytes in any::<Vec<u8>>()) {
+            let _ = Parser::parse(&bytes);
+        }
     }
 }

@@ -1,10 +1,7 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
-use kafka_wire_protocol::hex_dump;
-use kafka_wire_protocol::protocol::{
-    MetadataRequest, MetadataResponse, Parser, ParserError, ParserResult,
-};
+use kafka_wire_protocol::protocol::{MetadataRequest, Parser};
 
 fn main() -> std::io::Result<()> {
     let mut stream = TcpStream::connect("127.0.0.1:9092")?;
@@ -24,7 +21,7 @@ fn main() -> std::io::Result<()> {
         }
         bytes.extend_from_slice(&buffer[..bytes_read]);
 
-        if let (Ok(response), bytes_consumed) = parse_metadata_response(&bytes) {
+        if let (Ok(response), bytes_consumed) = Parser::parse(&bytes) {
             bytes.drain(..bytes_consumed);
             println!("Received complete response");
             println!("{:#?}", &response);
@@ -38,22 +35,4 @@ fn main() -> std::io::Result<()> {
 
     println!("Connection closed");
     Ok(())
-}
-
-fn parse_metadata_response(response: &[u8]) -> (ParserResult<MetadataResponse>, usize) {
-    if response.len() < 4 {
-        return (Err(ParserError::NotEnoughBytes), 0);
-    }
-
-    let size = i32::from_be_bytes([response[0], response[1], response[2], response[3]]);
-    let num_bytes = size as usize + 4;
-    if response.len() < num_bytes {
-        return (Err(ParserError::NotEnoughBytes), 0);
-    }
-
-    let mut parser = Parser::new(size);
-    (
-        parser.parse_metadata_response(&response[4..num_bytes]),
-        num_bytes,
-    )
 }
