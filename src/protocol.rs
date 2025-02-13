@@ -1,3 +1,60 @@
+use std::io::{Read, Write};
+
+use crate::hex_dump;
+
+#[derive(Debug)]
+pub struct MetadataRequest {
+    pub api_key: i16,
+    pub api_version: i16,
+    pub correlation_id: i32,
+    pub client_id: String,
+    pub topics: Vec<(Uuid, String)>,
+    pub allow_auto_topic_creation: bool,
+    pub include_topic_authorized_operations: bool,
+}
+
+impl MetadataRequest {
+    pub fn new(correlation_id: i32, client_id: impl Into<String>) -> Self {
+        MetadataRequest {
+            api_key: 3,
+            api_version: 12,
+            correlation_id,
+            client_id: client_id.into(),
+            topics: vec![],
+            allow_auto_topic_creation: false,
+            include_topic_authorized_operations: false,
+        }
+    }
+
+    pub fn length(&self) -> i32 {
+        (2 + 2 + 4 + 2 + self.client_id.len() + 4 + 2) as i32
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, std::io::Error> {
+        let mut bytes = Vec::new();
+
+        // Length
+        bytes.write_all(&self.length().to_be_bytes())?;
+
+        // Header
+        bytes.write_all(&self.api_key.to_be_bytes())?;
+        bytes.write_all(&self.api_version.to_be_bytes())?;
+        bytes.write_all(&self.correlation_id.to_be_bytes())?;
+
+        let client_id_length: i16 = self.client_id.len() as i16;
+        bytes.write_all(&client_id_length.to_be_bytes())?;
+        bytes.extend_from_slice(self.client_id.as_bytes());
+
+        // Request body
+        let num_topics: i32 = self.topics.len() as i32;
+        bytes.write_all(&num_topics.to_be_bytes())?;
+        bytes.push(0u8);
+        bytes.push(0u8);
+
+        Ok(bytes)
+    }
+}
+
 #[derive(Debug)]
 pub struct MetadataResponse {
     correlation_id: i32,
