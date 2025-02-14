@@ -1,8 +1,10 @@
+#[cfg(test)]
+use proptest_derive::Arbitrary;
 use std::io::Write;
 
 #[derive(Debug)]
+#[cfg_attr(test, derive(Arbitrary))]
 pub struct MetadataRequest {
-    pub api_key: i16,
     pub api_version: i16,
     pub correlation_id: i32,
     pub client_id: String,
@@ -14,7 +16,6 @@ pub struct MetadataRequest {
 impl MetadataRequest {
     pub fn new(correlation_id: i32, client_id: impl Into<String>) -> Self {
         MetadataRequest {
-            api_key: 3,
             api_version: 12,
             correlation_id,
             client_id: client_id.into(),
@@ -35,7 +36,7 @@ impl MetadataRequest {
         bytes.write_all(&self.length().to_be_bytes())?;
 
         // Header
-        bytes.write_all(&self.api_key.to_be_bytes())?;
+        bytes.write_all(&3i16.to_be_bytes())?;
         bytes.write_all(&self.api_version.to_be_bytes())?;
         bytes.write_all(&self.correlation_id.to_be_bytes())?;
 
@@ -53,7 +54,7 @@ impl MetadataRequest {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MetadataResponse {
     correlation_id: i32,
     throttle_time_ms: i32,
@@ -63,7 +64,7 @@ pub struct MetadataResponse {
     topics: Vec<Topic>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Broker {
     node_id: i32,
     host: String,
@@ -73,7 +74,7 @@ pub struct Broker {
 
 pub type Uuid = [u8; 16];
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Topic {
     error_code: i16,
     name: Option<String>,
@@ -83,7 +84,7 @@ pub struct Topic {
     topic_authorized_operations: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Partition {
     error_code: i16,
     partition_index: i32,
