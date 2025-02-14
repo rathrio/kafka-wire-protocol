@@ -1,4 +1,5 @@
 pub mod protocol;
+pub mod wire;
 
 pub fn hex_dump(bytes: &[u8]) {
     for chunk in bytes.chunks(16) {

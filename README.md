@@ -1,8 +1,9 @@
-Currently testing against modpapi kafka, so
+# Kafka Wire Protocol
+
+## Running integration tests
+
+Integration tests don't run by default with `cargo test`. Run them with:
 
 ```sh
-cd ../../Swisscom/modpapi
-docker compose up -d
+cargo test -- --ignored
 ```
-
-Fix me.
