@@ -8,7 +8,7 @@ use testcontainers::{
 #[test]
 #[ignore = "integration"]
 fn test_metadata_api() {
-    let _container = GenericImage::new("confluentinc/cp-kafka", "7.8.1")
+    let container = GenericImage::new("confluentinc/cp-kafka", "7.8.1")
         .with_wait_for(WaitFor::message_on_stdout("Kafka startTime"))
         .with_exposed_port(9092.tcp())
         .with_mapped_port(9092, 9092.tcp())
@@ -38,5 +38,7 @@ fn test_metadata_api() {
         .expect("Failed to start Kafka");
 
     let request = MetadataRequest::new(1234, "test-client");
-    let response = wire::submit_metadata_request(&request).unwrap();
+    let _response = wire::submit_metadata_request(&request).unwrap();
+
+    container.stop().expect("Failed to stop Kafka");
 }

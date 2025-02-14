@@ -3,6 +3,66 @@ use proptest_derive::Arbitrary;
 use std::io::Write;
 
 #[derive(Debug)]
+pub struct ApiVersionsRequest {
+    api_version: i16,
+    correlation_id: i32,
+    client_id: String,
+    client_software_name: String,
+    client_software_version: String,
+}
+
+impl ApiVersionsRequest {
+    pub fn new(
+        correlation_id: i32,
+        client_id: impl Into<String>,
+        client_software_name: impl Into<String>,
+        client_software_version: impl Into<String>,
+    ) -> Self {
+        ApiVersionsRequest {
+            api_version: 3,
+            correlation_id,
+            client_id: client_id.into(),
+            client_software_name: client_software_name.into(),
+            client_software_version: client_software_version.into(),
+        }
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, std::io::Error> {
+        let mut bytes = Vec::new();
+
+        let name_bytes = encode_compact_string(&self.client_software_name)?;
+        let version_bytes = encode_compact_string(&self.client_software_version)?;
+        let length: i32 =
+            (2 + 2 + 4 + 2 + self.client_id.len() + 1 + name_bytes.len() + version_bytes.len() + 1)
+                as i32;
+
+        // Length
+        bytes.write_all(&length.to_be_bytes())?;
+
+        // Header
+        bytes.write_all(&18i16.to_be_bytes())?;
+        bytes.write_all(&self.api_version.to_be_bytes())?;
+        bytes.write_all(&self.correlation_id.to_be_bytes())?;
+
+        let client_id_length: i16 = self.client_id.len() as i16;
+        bytes.write_all(&client_id_length.to_be_bytes())?;
+        bytes.extend_from_slice(self.client_id.as_bytes());
+
+        // Tag buffer
+        bytes.write_all(&0u8.to_be_bytes())?;
+
+        // Body
+        bytes.write_all(&name_bytes)?;
+        bytes.write_all(&version_bytes)?;
+
+        // Tag buffer
+        bytes.write_all(&0u8.to_be_bytes())?;
+
+        Ok(bytes)
+    }
+}
+
+#[derive(Debug)]
 #[cfg_attr(test, derive(Arbitrary))]
 pub struct MetadataRequest {
     pub api_version: i16,
@@ -101,52 +161,54 @@ pub enum ParserError {
     /// The size of the message as indicated in the first 4 bytes is larger than
     /// the byte buffer we want to parse.
     IncompleteMessage,
-    NotEnoughBytes,
     InvalidEncoding,
 }
 
 pub type ParserResult<T> = Result<T, ParserError>;
 
-pub struct Parser {
+pub struct Parser<'a> {
     /// Current location in the buffer
     current: usize,
-    /// How many bytes are left
-    size: i32,
+    bytes: &'a [u8],
 }
 
-impl Parser {
-    pub fn parse(bytes: &[u8]) -> (ParserResult<MetadataResponse>, usize) {
-        if bytes.len() < 4 {
-            return (Err(ParserError::IncompleteMessage), 0);
-        }
-
-        let size = i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        let num_bytes = size as usize + 4;
-        if bytes.len() < num_bytes {
-            return (Err(ParserError::IncompleteMessage), 0);
-        }
-
-        let mut parser = Parser::new(size);
-        (
-            parser.parse_metadata_response(&bytes[4..num_bytes]),
-            num_bytes,
-        )
+/// Total size of messsage including the 4 bytes for the size prefix. Note that bytes may be longer.
+fn parse_message_size(bytes: &[u8]) -> ParserResult<usize> {
+    if bytes.len() < 4 {
+        return Err(ParserError::IncompleteMessage);
     }
 
-    fn new(size: i32) -> Self {
-        Parser { current: 0, size }
+    let size = i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let num_bytes = size as usize + 4;
+    if bytes.len() < num_bytes {
+        return Err(ParserError::IncompleteMessage);
     }
 
-    pub fn parse_metadata_response(&mut self, bytes: &[u8]) -> ParserResult<MetadataResponse> {
-        let correlation_id = self.parse_i32(bytes)?;
-        self.parse_tagged_fields(bytes)?;
+    Ok(num_bytes)
+}
 
-        let throttle_time_ms = self.parse_i32(bytes)?;
-        let brokers = self.parse_brokers(bytes)?;
-        let cluster_id = self.parse_compact_nullable_string(bytes)?;
-        let controller_id = self.parse_i32(bytes)?;
-        let topics = self.parse_topics(bytes)?;
-        self.parse_tagged_fields(bytes)?;
+impl<'a> Parser<'a> {
+    pub fn parse(bytes: &[u8]) -> Result<(MetadataResponse, usize), ParserError> {
+        let num_bytes = parse_message_size(bytes)?;
+        let mut parser = Parser::new(&bytes[4..num_bytes]);
+        let metadata_response = parser.parse_metadata_response()?;
+        Ok((metadata_response, num_bytes))
+    }
+
+    fn new(bytes: &'a [u8]) -> Self {
+        Parser { current: 0, bytes }
+    }
+
+    pub fn parse_metadata_response(&mut self) -> ParserResult<MetadataResponse> {
+        let correlation_id = self.parse_i32()?;
+        self.parse_tagged_fields()?;
+
+        let throttle_time_ms = self.parse_i32()?;
+        let brokers = self.parse_brokers()?;
+        let cluster_id = self.parse_compact_nullable_string()?;
+        let controller_id = self.parse_i32()?;
+        let topics = self.parse_topics()?;
+        self.parse_tagged_fields()?;
 
         Ok(MetadataResponse {
             correlation_id,
@@ -158,8 +220,8 @@ impl Parser {
         })
     }
 
-    fn parse_topics(&mut self, bytes: &[u8]) -> ParserResult<Vec<Topic>> {
-        let n = self.parse_varint(bytes)?;
+    fn parse_topics(&mut self) -> ParserResult<Vec<Topic>> {
+        let n = self.parse_varint()?;
         if n <= 1 {
             return Ok(vec![]);
         }
@@ -168,20 +230,20 @@ impl Parser {
         let mut topics = Vec::with_capacity(topics_count as usize);
 
         for _ in 0..topics_count {
-            topics.push(self.parse_topic(bytes)?);
+            topics.push(self.parse_topic()?);
         }
 
         Ok(topics)
     }
 
-    fn parse_topic(&mut self, bytes: &[u8]) -> ParserResult<Topic> {
-        let error_code = self.parse_i16(bytes)?;
-        let name = self.parse_compact_nullable_string(bytes)?;
-        let topic_id = self.parse_uuid(bytes)?;
-        let is_internal = self.parse_boolean(bytes)?;
-        let partitions = self.parse_partitions(bytes)?;
-        let topic_authorized_operations = self.parse_u32(bytes)?;
-        self.parse_tagged_fields(bytes)?;
+    fn parse_topic(&mut self) -> ParserResult<Topic> {
+        let error_code = self.parse_i16()?;
+        let name = self.parse_compact_nullable_string()?;
+        let topic_id = self.parse_uuid()?;
+        let is_internal = self.parse_boolean()?;
+        let partitions = self.parse_partitions()?;
+        let topic_authorized_operations = self.parse_u32()?;
+        self.parse_tagged_fields()?;
 
         Ok(Topic {
             error_code,
@@ -193,8 +255,8 @@ impl Parser {
         })
     }
 
-    fn parse_partitions(&mut self, bytes: &[u8]) -> ParserResult<Vec<Partition>> {
-        let n = self.parse_varint(bytes)?;
+    fn parse_partitions(&mut self) -> ParserResult<Vec<Partition>> {
+        let n = self.parse_varint()?;
         if n <= 1 {
             return Ok(vec![]);
         }
@@ -203,21 +265,21 @@ impl Parser {
         let mut partitions = Vec::with_capacity(partitions_count as usize);
 
         for _ in 0..partitions_count {
-            partitions.push(self.parse_partition(bytes)?);
+            partitions.push(self.parse_partition()?);
         }
 
         Ok(partitions)
     }
 
-    fn parse_partition(&mut self, bytes: &[u8]) -> ParserResult<Partition> {
-        let error_code = self.parse_i16(bytes)?;
-        let partition_index = self.parse_i32(bytes)?;
-        let leader_id = self.parse_i32(bytes)?;
-        let leader_epoch = self.parse_i32(bytes)?;
-        let replica_nodes = self.parse_i32_compact_array(bytes)?;
-        let isr_nodes = self.parse_i32_compact_array(bytes)?;
-        let offline_replicas = self.parse_i32_compact_array(bytes)?;
-        self.parse_tagged_fields(bytes)?;
+    fn parse_partition(&mut self) -> ParserResult<Partition> {
+        let error_code = self.parse_i16()?;
+        let partition_index = self.parse_i32()?;
+        let leader_id = self.parse_i32()?;
+        let leader_epoch = self.parse_i32()?;
+        let replica_nodes = self.parse_i32_compact_array()?;
+        let isr_nodes = self.parse_i32_compact_array()?;
+        let offline_replicas = self.parse_i32_compact_array()?;
+        self.parse_tagged_fields()?;
 
         Ok(Partition {
             error_code,
@@ -230,8 +292,8 @@ impl Parser {
         })
     }
 
-    fn parse_i32_compact_array(&mut self, bytes: &[u8]) -> ParserResult<Vec<i32>> {
-        let n = self.parse_varint(bytes)?;
+    fn parse_i32_compact_array(&mut self) -> ParserResult<Vec<i32>> {
+        let n = self.parse_varint()?;
         if n <= 1 {
             return Ok(vec![]);
         }
@@ -240,21 +302,21 @@ impl Parser {
         let mut numbers = Vec::with_capacity(count as usize);
 
         for _ in 0..count {
-            numbers.push(self.parse_i32(bytes)?);
+            numbers.push(self.parse_i32()?);
         }
 
         Ok(numbers)
     }
 
-    fn parse_uuid(&mut self, bytes: &[u8]) -> ParserResult<Uuid> {
+    fn parse_uuid(&mut self) -> ParserResult<Uuid> {
         let mut uuid: Uuid = [0u8; 16];
-        uuid.copy_from_slice(&bytes[self.current..(self.current + 16)]);
+        uuid.copy_from_slice(&self.bytes[self.current..(self.current + 16)]);
         self.current += 16;
         Ok(uuid)
     }
 
-    fn parse_tagged_fields(&mut self, bytes: &[u8]) -> ParserResult<()> {
-        let num_fields = self.parse_varint(bytes)?;
+    fn parse_tagged_fields(&mut self) -> ParserResult<()> {
+        let num_fields = self.parse_varint()?;
         if num_fields == 0 {
             return Ok(());
         }
@@ -262,8 +324,8 @@ impl Parser {
         todo!("Tagged fields not supported yet")
     }
 
-    fn parse_brokers(&mut self, bytes: &[u8]) -> ParserResult<Vec<Broker>> {
-        let n = self.parse_varint(bytes)?;
+    fn parse_brokers(&mut self) -> ParserResult<Vec<Broker>> {
+        let n = self.parse_varint()?;
         if n <= 1 {
             return Ok(vec![]);
         }
@@ -272,18 +334,18 @@ impl Parser {
         let mut brokers = Vec::with_capacity(brokers_count as usize);
 
         for _ in 0..brokers_count {
-            brokers.push(self.parse_broker(bytes)?);
+            brokers.push(self.parse_broker()?);
         }
 
         Ok(brokers)
     }
 
-    fn parse_broker(&mut self, bytes: &[u8]) -> ParserResult<Broker> {
-        let node_id = self.parse_i32(bytes)?;
-        let host = self.parse_compact_string(bytes)?;
-        let port = self.parse_i32(bytes)?;
-        let rack = self.parse_compact_nullable_string(bytes)?;
-        self.parse_tagged_fields(bytes)?;
+    fn parse_broker(&mut self) -> ParserResult<Broker> {
+        let node_id = self.parse_i32()?;
+        let host = self.parse_compact_string()?;
+        let port = self.parse_i32()?;
+        let rack = self.parse_compact_nullable_string()?;
+        self.parse_tagged_fields()?;
 
         Ok(Broker {
             node_id,
@@ -293,57 +355,54 @@ impl Parser {
         })
     }
 
-    fn parse_compact_string(&mut self, bytes: &[u8]) -> ParserResult<String> {
-        let n = self.parse_varint(bytes)?;
+    fn parse_compact_string(&mut self) -> ParserResult<String> {
+        let n = self.parse_varint()?;
         let num_bytes = n - 1;
-        let utf8_bytes = &bytes[self.current..(self.current + (num_bytes as usize))];
+        let utf8_bytes = &self.bytes[self.current..(self.current + (num_bytes as usize))];
         self.current += num_bytes as usize;
         Ok(String::from_utf8_lossy(utf8_bytes).to_string())
     }
 
-    fn parse_compact_nullable_string(&mut self, bytes: &[u8]) -> ParserResult<Option<String>> {
-        let n = self.parse_varint(bytes)?;
+    fn parse_compact_nullable_string(&mut self) -> ParserResult<Option<String>> {
+        let n = self.parse_varint()?;
         if n == 0 {
             return Ok(None);
         }
 
         let num_bytes = n - 1;
-        let utf8_bytes = &bytes[self.current..(self.current + (num_bytes as usize))];
+        let utf8_bytes = &self.bytes[self.current..(self.current + (num_bytes as usize))];
         self.current += num_bytes as usize;
         Ok(Some(String::from_utf8_lossy(utf8_bytes).to_string()))
     }
 
-    fn parse_boolean(&mut self, bytes: &[u8]) -> ParserResult<bool> {
-        Ok(self.next_byte(bytes)? != 0)
+    fn parse_boolean(&mut self) -> ParserResult<bool> {
+        Ok(self.next_byte() != 0)
     }
 
-    fn parse_i16(&mut self, bytes: &[u8]) -> ParserResult<i16> {
-        Ok(i16::from_be_bytes([
-            self.next_byte(bytes)?,
-            self.next_byte(bytes)?,
-        ]))
+    fn parse_i16(&mut self) -> ParserResult<i16> {
+        Ok(i16::from_be_bytes([self.next_byte(), self.next_byte()]))
     }
 
-    fn parse_i32(&mut self, bytes: &[u8]) -> ParserResult<i32> {
+    fn parse_i32(&mut self) -> ParserResult<i32> {
         Ok(i32::from_be_bytes([
-            self.next_byte(bytes)?,
-            self.next_byte(bytes)?,
-            self.next_byte(bytes)?,
-            self.next_byte(bytes)?,
+            self.next_byte(),
+            self.next_byte(),
+            self.next_byte(),
+            self.next_byte(),
         ]))
     }
 
-    fn parse_u32(&mut self, bytes: &[u8]) -> ParserResult<u32> {
+    fn parse_u32(&mut self) -> ParserResult<u32> {
         Ok(u32::from_be_bytes([
-            self.next_byte(bytes)?,
-            self.next_byte(bytes)?,
-            self.next_byte(bytes)?,
-            self.next_byte(bytes)?,
+            self.next_byte(),
+            self.next_byte(),
+            self.next_byte(),
+            self.next_byte(),
         ]))
     }
 
-    fn parse_varint(&mut self, bytes: &[u8]) -> ParserResult<u64> {
-        match parse_varint(&bytes[self.current..]) {
+    fn parse_varint(&mut self) -> ParserResult<u64> {
+        match parse_varint(&self.bytes[self.current..]) {
             Ok((value, num_bytes)) => {
                 self.current += num_bytes;
                 Ok(value)
@@ -352,15 +411,10 @@ impl Parser {
         }
     }
 
-    fn next_byte(&mut self, bytes: &[u8]) -> Result<u8, ParserError> {
-        let byte = bytes[self.current];
+    fn next_byte(&mut self) -> u8 {
+        let byte = self.bytes[self.current];
         self.current += 1;
-
-        if self.current == self.size as usize {
-            return Err(ParserError::NotEnoughBytes);
-        }
-
-        Ok(byte)
+        byte
     }
 }
 
@@ -390,6 +444,32 @@ fn parse_varint(bytes: &[u8]) -> Result<(u64, usize), &'static str> {
     }
 
     Err("incomplete varint")
+}
+
+/// Encodes a u64 into a Protocol Buffers varint.
+pub fn encode_varint(mut value: u64) -> Vec<u8> {
+    let mut bytes = Vec::new();
+
+    // Continue encoding until the remaining value fits in 7 bits.
+    while value >= 0x80 {
+        // Take the lower 7 bits, set the MSB to indicate continuation,
+        // and push the byte into the buffer.
+        bytes.push((value as u8 & 0x7F) | 0x80);
+        // Shift right by 7 bits to process the next chunk.
+        value >>= 7;
+    }
+
+    // The final byte (with MSB = 0) holds the remaining value.
+    bytes.push(value as u8);
+    bytes
+}
+
+pub fn encode_compact_string(string: &str) -> Result<Vec<u8>, std::io::Error> {
+    let mut bytes = Vec::new();
+    let length = encode_varint((string.len() + 1) as u64);
+    bytes.write_all(&length)?;
+    bytes.write_all(string.as_bytes())?;
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -432,6 +512,13 @@ mod tests {
         #[test]
         fn test_varint_doesnt_crash(bytes in any::<Vec<u8>>()) {
             let _ = parse_varint(&bytes);
+        }
+
+        #[test]
+        fn test_parse_and_encode_varint(number in any::<u64>()) {
+            let bytes = encode_varint(number);
+            let (parsed_number, _) = parse_varint(&bytes).unwrap();
+            assert_eq!(number, parsed_number);
         }
 
         #[test]
