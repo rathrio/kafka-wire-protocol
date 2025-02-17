@@ -2,10 +2,15 @@
 
 Experimenting with a Rust implementation of the [Kafka Wire Protocol](https://kafka.apache.org/protocol).
 
-## Running integration tests
-
-Integration tests don't run by default with `cargo test`. Run them with:
+## Running tests
 
 ```sh
-cargo test -- --ignored
+cargo test
+```
+
+As the integration tests are a bit slow, they are ignored by default, include
+them with:
+
+```sh
+cargo test -- --include-ignored
 ```

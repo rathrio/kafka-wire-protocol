@@ -1,4 +1,4 @@
-use kafka_wire_protocol::{protocol::MetadataRequest, wire};
+use kafka_wire_protocol::{protocol::MetadataRequest, wire::Wire};
 use testcontainers::{
     core::{IntoContainerPort, WaitFor},
     runners::SyncRunner,
@@ -11,7 +11,7 @@ fn test_metadata_api() {
     let container = GenericImage::new("confluentinc/cp-kafka", "7.8.1")
         .with_wait_for(WaitFor::message_on_stdout("Kafka startTime"))
         .with_exposed_port(9092.tcp())
-        .with_mapped_port(9092, 9092.tcp())
+        .with_mapped_port(9099, 9092.tcp())
         .with_network("bridge")
         .with_env_var("DEBUG", "1")
         .with_env_var("KAFKA_KRAFT_MODE", "true")
@@ -37,8 +37,9 @@ fn test_metadata_api() {
         .start()
         .expect("Failed to start Kafka");
 
+    let mut wire = Wire::new("localhost", 9099).expect("Failed to connect to Kafka");
     let request = MetadataRequest::new(1234, "test-client");
-    let _response = wire::submit_metadata_request(&request).unwrap();
+    let _response = wire.submit_metadata_request(&request).unwrap();
 
     container.stop().expect("Failed to stop Kafka");
 }

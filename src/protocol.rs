@@ -1,5 +1,3 @@
-#[cfg(test)]
-use proptest_derive::Arbitrary;
 use std::io::Write;
 
 #[derive(Debug)]
@@ -63,7 +61,21 @@ impl ApiVersionsRequest {
 }
 
 #[derive(Debug)]
-#[cfg_attr(test, derive(Arbitrary))]
+pub struct ApiVersionsResponse {
+    pub correlation_id: i32,
+    pub throttle_time_ms: i32,
+    pub error_code: i16,
+    pub api_keys: Vec<ApiKey>,
+}
+
+#[derive(Debug)]
+pub struct ApiKey {
+    pub api_key: i16,
+    pub min_version: i16,
+    pub max_version: i16,
+}
+
+#[derive(Debug)]
 pub struct MetadataRequest {
     pub api_version: i16,
     pub correlation_id: i32,
@@ -156,6 +168,12 @@ pub struct Partition {
 }
 
 #[derive(Debug)]
+struct TaggedField {
+    key: u64,
+    value: Vec<u8>,
+}
+
+#[derive(Debug)]
 pub enum ParserError {
     Unknown,
     /// The size of the message as indicated in the first 4 bytes is larger than
@@ -188,18 +206,27 @@ fn parse_message_size(bytes: &[u8]) -> ParserResult<usize> {
 }
 
 impl<'a> Parser<'a> {
-    pub fn parse(bytes: &[u8]) -> Result<(MetadataResponse, usize), ParserError> {
+    pub fn parse_metadata_response(bytes: &[u8]) -> Result<(MetadataResponse, usize), ParserError> {
         let num_bytes = parse_message_size(bytes)?;
         let mut parser = Parser::new(&bytes[4..num_bytes]);
-        let metadata_response = parser.parse_metadata_response()?;
-        Ok((metadata_response, num_bytes))
+        let reponse = parser.parse_metadata_response_inner()?;
+        Ok((reponse, num_bytes))
+    }
+
+    pub fn parse_api_versions_response(
+        bytes: &[u8],
+    ) -> Result<(ApiVersionsResponse, usize), ParserError> {
+        let num_bytes = parse_message_size(bytes)?;
+        let mut parser = Parser::new(&bytes[4..num_bytes]);
+        let response = parser.parse_api_versions_response_inner()?;
+        Ok((response, num_bytes))
     }
 
     fn new(bytes: &'a [u8]) -> Self {
         Parser { current: 0, bytes }
     }
 
-    pub fn parse_metadata_response(&mut self) -> ParserResult<MetadataResponse> {
+    fn parse_metadata_response_inner(&mut self) -> ParserResult<MetadataResponse> {
         let correlation_id = self.parse_i32()?;
         self.parse_tagged_fields()?;
 
@@ -217,6 +244,51 @@ impl<'a> Parser<'a> {
             cluster_id,
             controller_id,
             topics,
+        })
+    }
+
+    fn parse_api_versions_response_inner(&mut self) -> ParserResult<ApiVersionsResponse> {
+        let correlation_id = self.parse_i32()?;
+        let error_code = self.parse_i16()?;
+        let api_keys = self.parse_api_keys()?;
+        let throttle_time_ms = self.parse_i32()?;
+
+        self.parse_tagged_fields()?;
+
+        Ok(ApiVersionsResponse {
+            correlation_id,
+            throttle_time_ms,
+            error_code,
+            api_keys,
+        })
+    }
+
+    fn parse_api_keys(&mut self) -> ParserResult<Vec<ApiKey>> {
+        let n = self.parse_varint()?;
+        if n <= 1 {
+            return Ok(vec![]);
+        }
+
+        let api_keys_count = n - 1;
+        let mut api_keys = Vec::with_capacity(api_keys_count as usize);
+
+        for _ in 0..api_keys_count {
+            api_keys.push(self.parse_api_key()?);
+        }
+
+        Ok(api_keys)
+    }
+
+    fn parse_api_key(&mut self) -> ParserResult<ApiKey> {
+        let api_key = self.parse_i16()?;
+        let min_version = self.parse_i16()?;
+        let max_version = self.parse_i16()?;
+        self.parse_tagged_fields()?;
+
+        Ok(ApiKey {
+            api_key,
+            min_version,
+            max_version,
         })
     }
 
@@ -315,13 +387,28 @@ impl<'a> Parser<'a> {
         Ok(uuid)
     }
 
-    fn parse_tagged_fields(&mut self) -> ParserResult<()> {
+    fn parse_tagged_fields(&mut self) -> ParserResult<Vec<TaggedField>> {
         let num_fields = self.parse_varint()?;
         if num_fields == 0 {
-            return Ok(());
+            return Ok(vec![]);
         }
 
-        todo!("Tagged fields not supported yet")
+        let mut fields = Vec::with_capacity(num_fields as usize);
+        for _ in 0..num_fields {
+            let key = self.parse_varint()?;
+            let value = self.parse_bytes()?;
+            fields.push(TaggedField { key, value });
+        }
+
+        Ok(fields)
+    }
+
+    fn parse_bytes(&mut self) -> ParserResult<Vec<u8>> {
+        let n = self.parse_varint()?;
+        let num_bytes = n as usize;
+        let bytes = &self.bytes[self.current..(self.current + num_bytes)];
+        self.current += num_bytes;
+        Ok(bytes.to_vec())
     }
 
     fn parse_brokers(&mut self) -> ParserResult<Vec<Broker>> {
@@ -523,7 +610,7 @@ mod tests {
 
         #[test]
         fn test_parser_doesnt_crash(bytes in any::<Vec<u8>>()) {
-            let _ = Parser::parse(&bytes);
+            let _ = Parser::parse_metadata_response(&bytes);
         }
     }
 }
