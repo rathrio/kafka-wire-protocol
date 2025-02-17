@@ -609,8 +609,13 @@ mod tests {
         }
 
         #[test]
-        fn test_parser_doesnt_crash(bytes in any::<Vec<u8>>()) {
+        fn test_parse_metadata_response_doesnt_crash(bytes in any::<Vec<u8>>()) {
             let _ = Parser::parse_metadata_response(&bytes);
+        }
+
+        #[test]
+        fn test_parse_api_versions_response_doesnt_crash(bytes in any::<Vec<u8>>()) {
+            let _ = Parser::parse_api_versions_response(&bytes);
         }
     }
 }
